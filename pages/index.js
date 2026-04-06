@@ -2,6 +2,160 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { AGENTS, COLORS, ICONS } from "../lib/agents";
 import { loadProjects, saveProject, deleteProject, newProject, loadMemory, addMemory, getMemoryContext } from "../lib/storage";
 
+// ─── LIVE SPORTS DATA ───────────────────────────────────────────────────────
+// Uses ESPN's free public API — no key needed
+async function fetchLiveSports() {
+  const sports = [
+    { name: "NBA", url: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard" },
+    { name: "NFL", url: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard" },
+    { name: "MLB", url: "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard" },
+    { name: "NCAAFB", url: "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard" },
+    { name: "NCAAMB", url: "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard" },
+  ];
+
+  const results = [];
+
+  for (const sport of sports) {
+    try {
+      const res = await fetch(sport.url);
+      const data = await res.json();
+      const events = data.events || [];
+
+      if (events.length === 0) {
+        results.push(`${sport.name}: No games today.`);
+        continue;
+      }
+
+      const gameLines = events.map(event => {
+        const comp = event.competitions?.[0];
+        const status = comp?.status?.type?.description || "Unknown";
+        const detail = comp?.status?.type?.detail || "";
+        const competitors = comp?.competitors || [];
+        const home = competitors.find(c => c.homeAway === "home");
+        const away = competitors.find(c => c.homeAway === "away");
+        const homeName = home?.team?.abbreviation || "?";
+        const awayName = away?.team?.abbreviation || "?";
+        const homeScore = home?.score ?? "-";
+        const awayScore = away?.score ?? "-";
+        const homeRecord = home?.records?.[0]?.summary || "";
+        const awayRecord = away?.records?.[0]?.summary || "";
+
+        let line = `  ${awayName}${awayRecord ? ` (${awayRecord})` : ""} ${awayScore} @ ${homeName}${homeRecord ? ` (${homeRecord})` : ""} ${homeScore}`;
+        line += ` — ${status}${detail ? `: ${detail}` : ""}`;
+
+        // Add leaders if available
+        const leaders = comp?.leaders || [];
+        const pts = leaders.find(l => l.name === "points" || l.abbreviation === "PTS" || l.abbreviation === "REC");
+        if (pts?.leaders?.[0]) {
+          const leader = pts.leaders[0];
+          line += `\n    ⭐ ${leader.athlete?.displayName || "?"}: ${leader.displayValue}`;
+        }
+
+        return line;
+      });
+
+      results.push(`${sport.name} (${events.length} game${events.length !== 1 ? "s" : ""}):\n${gameLines.join("\n")}`);
+    } catch (e) {
+      results.push(`${sport.name}: Could not fetch data.`);
+    }
+  }
+
+  return results.join("\n\n");
+}
+
+async function fetchTeamGame(teamName) {
+  const sports = [
+    { name: "NBA", url: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard" },
+    { name: "NFL", url: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard" },
+    { name: "MLB", url: "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard" },
+    { name: "NCAAFB", url: "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard" },
+    { name: "NCAAMB", url: "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard" },
+  ];
+
+  const query = teamName.toLowerCase();
+
+  for (const sport of sports) {
+    try {
+      const res = await fetch(sport.url);
+      const data = await res.json();
+      const events = data.events || [];
+
+      for (const event of events) {
+        const comp = event.competitions?.[0];
+        const competitors = comp?.competitors || [];
+        const names = competitors.map(c => [
+          c.team?.displayName?.toLowerCase(),
+          c.team?.shortDisplayName?.toLowerCase(),
+          c.team?.abbreviation?.toLowerCase(),
+          c.team?.name?.toLowerCase(),
+        ]).flat();
+
+        if (names.some(n => n && n.includes(query))) {
+          const status = comp?.status?.type?.description || "Unknown";
+          const detail = comp?.status?.type?.detail || "";
+          const home = competitors.find(c => c.homeAway === "home");
+          const away = competitors.find(c => c.homeAway === "away");
+          const homeName = home?.team?.displayName || "?";
+          const awayName = away?.team?.displayName || "?";
+          const homeScore = home?.score ?? "-";
+          const awayScore = away?.score ?? "-";
+
+          let result = `[${sport.name}] ${awayName} ${awayScore} @ ${homeName} ${homeScore}\nStatus: ${status}${detail ? ` — ${detail}` : ""}`;
+
+          // Add all stat leaders
+          const leaders = comp?.leaders || [];
+          if (leaders.length > 0) {
+            result += "\n\nStat Leaders:";
+            leaders.forEach(cat => {
+              const top = cat.leaders?.[0];
+              if (top) result += `\n  ${cat.displayName}: ${top.athlete?.displayName || "?"} — ${top.displayValue}`;
+            });
+          }
+
+          return result;
+        }
+      }
+    } catch (e) {
+      // continue to next sport
+    }
+  }
+
+  return `No current game found for "${teamName}". They may not be playing today.`;
+}
+
+// Detect if a message is asking about sports/live games
+function detectSportsQuery(message) {
+  const msg = message.toLowerCase();
+  const sportsKeywords = [
+    "score", "game", "playing", "live", "tonight", "today", "vs", "versus",
+    "quarter", "half", "period", "inning", "match", "winning", "losing",
+    "nba", "nfl", "mlb", "ncaa", "basketball", "football", "baseball",
+    "lakers", "warriors", "celtics", "knicks", "bulls", "heat", "nets",
+    "chiefs", "eagles", "cowboys", "patriots", "broncos", "packers",
+    "yankees", "dodgers", "astros", "cubs", "mets", "red sox",
+    "ducks", "ducks game", "oregon", "duke", "kansas", "kentucky",
+    "luka", "lebron", "curry", "durant", "giannis", "mahomes",
+    "standings", "playoffs", "championship", "final score", "box score",
+    "stats", "points", "touchdown", "home run", "who won", "who's winning"
+  ];
+  return sportsKeywords.some(kw => msg.includes(kw));
+}
+
+// Extract team name from message
+function extractTeamName(message) {
+  const msg = message.toLowerCase();
+  const teams = [
+    "lakers", "warriors", "celtics", "knicks", "bulls", "heat", "nets", "bucks",
+    "suns", "nuggets", "clippers", "mavs", "mavericks", "rockets", "spurs",
+    "chiefs", "eagles", "cowboys", "patriots", "broncos", "packers", "49ers",
+    "ravens", "bills", "bengals", "rams", "seahawks", "bears", "lions", "vikings",
+    "yankees", "dodgers", "astros", "cubs", "mets", "red sox", "braves", "giants",
+    "oregon", "duke", "kansas", "kentucky", "unc", "ucla", "michigan", "ohio state"
+  ];
+  return teams.find(t => msg.includes(t)) || null;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function askClaude(messages, system) {
   const res = await fetch("/api/claude", {
     method: "POST",
@@ -121,6 +275,34 @@ export default function App() {
   async function runTeamChat(userMessage) {
     setLoading(true);
     try {
+      // ── SPORTS INTERCEPTION ──────────────────────────────────────
+      if (detectSportsQuery(userMessage)) {
+        addMsg("researcher", "...");
+        await sleep(200);
+
+        let sportsContext = "";
+        const teamName = extractTeamName(userMessage);
+
+        if (teamName) {
+          addMsg("researcher", `🔴 LIVE — Fetching ${teamName} game data...`, true);
+          await sleep(100);
+          sportsContext = await fetchTeamGame(teamName);
+        } else {
+          addMsg("researcher", "🔴 LIVE — Fetching all scores now...", true);
+          await sleep(100);
+          sportsContext = await fetchLiveSports();
+        }
+
+        // Remove the status message and replace with real answer
+        const response = await callAgent("researcher",
+          `Jose asked: "${userMessage}"\n\nHere is the LIVE sports data pulled right now:\n\n${sportsContext}\n\nAnswer Jose's question using this real data. Be concise and direct. If a game is live, say so clearly.`
+        );
+        replaceTyping("researcher", response);
+        setLoading(false);
+        return;
+      }
+      // ─────────────────────────────────────────────────────────────
+
       addMsg("orchestrator", "...");
       await sleep(300);
 
@@ -180,6 +362,25 @@ export default function App() {
 
   async function runDirectChat(agentName, userMessage) {
     setLoading(true);
+
+    // Sports interception for direct chat too
+    if (detectSportsQuery(userMessage) && (agentName === "researcher" || agentName === "analyst")) {
+      addMsg(agentName, "...");
+      await sleep(200);
+      const teamName = extractTeamName(userMessage);
+      let sportsContext = teamName ? await fetchTeamGame(teamName) : await fetchLiveSports();
+      try {
+        const response = await callAgent(agentName,
+          `Jose asked: "${userMessage}"\n\nLIVE sports data:\n\n${sportsContext}\n\nAnswer using this real data.`
+        );
+        replaceTyping(agentName, response);
+      } catch (e) {
+        replaceTyping(agentName, `Error: ${e.message}`);
+      }
+      setLoading(false);
+      return;
+    }
+
     addMsg(agentName, "...");
     try {
       const response = await callAgent(agentName, userMessage);
@@ -200,10 +401,20 @@ export default function App() {
     setLoading(true);
     addMsg("orchestrator", "Good morning Jose. Running your daily briefing...");
     await sleep(500);
+
+    // Fetch live sports for briefing
+    addMsg("researcher", "🔴 Pulling live scores...", true);
+    let liveScores = "";
+    try {
+      liveScores = await fetchLiveSports();
+    } catch (e) {
+      liveScores = "Could not fetch live scores.";
+    }
+
     addMsg("researcher", "...");
     try {
       const response = await callAgent("researcher",
-        `Generate Jose's daily briefing for ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}.\n\nCover IN THIS ORDER:\n1. NBA & SPORTS — scores, news, Luka Doncic/Lakers\n2. NIL INDUSTRY — deals, rule changes, trends for OA and NEST\n3. STOCK MARKET — major moves, investing news\n4. AI & TECH — notable developments\n5. ECONOMICS — macro trends\n\n2-3 bullets per section. End with:\n## TODAY'S PRIORITIES\nWhat Jose should focus on today.`
+        `Generate Jose's daily briefing for ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}.\n\nHere are TODAY'S LIVE SCORES (pulled right now):\n\n${liveScores}\n\nCover IN THIS ORDER:\n1. NBA & SPORTS — use the live scores above, add context/analysis\n2. NIL INDUSTRY — deals, rule changes, trends for OA and NEST\n3. STOCK MARKET — major moves, investing news\n4. AI & TECH — notable developments\n5. ECONOMICS — macro trends\n\n2-3 bullets per section. End with:\n## TODAY'S PRIORITIES\nWhat Jose should focus on today.`
       );
       replaceTyping("researcher", response);
     } catch (e) {
@@ -287,7 +498,7 @@ export default function App() {
             <span style={{ fontSize: "18px", color: "#ff6b35" }}>◈</span>
             <div>
               <div style={{ fontSize: "11px", fontWeight: "600", letterSpacing: "3px", color: "#ff6b35" }}>JOSE'S TEAM</div>
-              <div style={{ fontSize: "9px", color: "#3a3a3e", letterSpacing: "1px" }}>8 AGENTS READY</div>
+              <div style={{ fontSize: "9px", color: "#3a3a3e", letterSpacing: "1px" }}>8 AGENTS · 🔴 LIVE SPORTS</div>
             </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -414,7 +625,8 @@ export default function App() {
             <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "8px" }}>
               <div style={{ fontSize: "32px", color: "#1e1e28", marginBottom: "8px" }}>◈</div>
               <div style={{ fontSize: "14px", color: "#52525b", letterSpacing: "2px" }}>JOSE'S AGENT TEAM</div>
-              <div style={{ fontSize: "11px", color: "#3a3a3e", marginBottom: "24px" }}>8 agents ready to work</div>
+              <div style={{ fontSize: "11px", color: "#3a3a3e", marginBottom: "4px" }}>8 agents ready to work</div>
+              <div style={{ fontSize: "9px", color: "#ff6b3566", letterSpacing: "1px", marginBottom: "20px" }}>🔴 LIVE SPORTS DATA ENABLED</div>
               <div style={{ display: "flex", gap: "10px", marginBottom: "32px" }}>
                 <button onClick={startNewTeamChat} style={{ padding: "12px 20px", background: "#ff6b35", border: "none", borderRadius: "8px", color: "#000", fontSize: "11px", fontWeight: "600", letterSpacing: "1px", cursor: "pointer", fontFamily: "inherit" }}>
                   START TEAM CHAT
